@@ -20,7 +20,7 @@ enum STATE {
   NUMBER_DECIMAL_POINT,
   NUMBER_NEGATIVE,
   NUMBER_DIGIT,
-  STRING_VALUE
+  STRING_VALUE,
 }
 
 const Char = {
@@ -156,17 +156,21 @@ export class MultiJSON {
       ret = val;
     }
 
+    const { top_levels } = this;
+    if (ret) top_levels.push(ret);
+    cb && top_levels.forEach(cb);
+
+    this.top_levels = [];
+    this.state_stack = [];
     this.state = STATE.VALUE;
-    this.buffer = "";
     this.fraction = false;
     this.exponent = false;
     this.top = -1;
-
-    cb && ret && cb(ret);
-    return ret;
+    
+    return top_levels;
   }
 
-  public parse(chunk: string, cb?: (json: unknown) => void) {
+  public parse(chunk: string | null, cb?: (json: unknown) => void) {
     if (chunk === null) {
       if (cb) {
         this.end(cb);
@@ -177,40 +181,51 @@ export class MultiJSON {
 
     this.cb = cb;
 
-    let i = 0;    
-    char: for (;;) {
+    const l = chunk.length;    
+    char: for (let i = 0;i<l;) {
       let c = chunk.charCodeAt(i++);
-      if (!c) break;
-  
-      if (isWhitespace(c)) continue;
-      
-      for (;;) switch (this.state) {
+      state: for (;;) {
+        switch (this.state) {
   
         case STATE.VALUE:
-               if(c === Char.doubleQuote) this.call(STATE.STRING, STATE.STRING_VALUE);
-          else if(c === Char.openBrace) this.state = STATE.OPEN_OBJECT;
+          while (isWhitespace(c)) {
+            if (i === l) break char;
+            c = chunk.charCodeAt(i++);
+          }
+               if(c === Char.openBrace) this.state = STATE.OPEN_OBJECT;
           else if(c === Char.openBracket) this.state = STATE.OPEN_ARRAY;
           else if(c === Char.t) this.state = STATE.TRUE;
           else if(c === Char.f) this.state = STATE.FALSE;
           else if(c === Char.n) this.state = STATE.NULL;
-          else if(c === Char.minus) {
-            this.buffer += "-";
+          else if(c === Char.doubleQuote) {
+            this.buffer = "";
+            this.call(STATE.STRING, STATE.STRING_VALUE);
+          } else if(c === Char.minus) {
+            this.fraction = false;
+            this.buffer = "-";
             this.state = STATE.NUMBER_NEGATIVE;
           } else if(c === Char._0) {
             this.buffer = '0';
             this.state = STATE.NUMBER_DECIMAL_POINT;
+          } else if(c === Char.period) {
+            this.buffer = '.';
+            this.fraction = true;
+            this.state = STATE.NUMBER_DIGIT;
           } else if(Char._0 < c && c <= Char._9) {
-            this.buffer += String.fromCharCode(c);
+            this.buffer = String.fromCharCode(c);
             this.state = STATE.NUMBER_DIGIT;
           } else throw new Error("Bad value");
-        continue char;
+          continue char;
 
         case STATE.STRING_VALUE:
           this.closevalue(this.buffer);
-          this.buffer = "";
-          continue;
+          continue state;
 
         case STATE.OPEN_OBJECT:
+          while (isWhitespace(c)) {
+            if (i === l) break char;
+            c = chunk.charCodeAt(i++);
+          }
           if(c === Char.closeBrace) {
             // Empty Object
             this.closevalue({});
@@ -225,30 +240,42 @@ export class MultiJSON {
           //fallthrough
 
         case STATE.OPEN_KEY:
-          if (isWhitespace(c)) continue;
+          while (isWhitespace(c)) {
+            if (i === l) break char;
+            c = chunk.charCodeAt(i++);
+          }
           if(c !== Char.doubleQuote)
             throw new Error("Malformed object key should start with \"");
+          this.buffer = "";
           this.call(STATE.STRING, STATE.KEY_VALUE);
           continue char;
 
         case STATE.KEY_VALUE:
-          this.value_stack[this.top].key = this.buffer;
-          this.buffer = "";
+          while (isWhitespace(c)) {
+            if (i === l) break char;
+            c = chunk.charCodeAt(i++);
+          }
           if (c !== Char.colon) throw new Error("Malformed object; key must be followed by colon.");
+          
+          this.value_stack[this.top].key = this.buffer;
           this.call(STATE.VALUE, STATE.PARSE_OBJECT);
           continue char;
 
         case STATE.PARSE_OBJECT:
-          if (c === Char.closeBrace) {
-            this.closenested();
-          } else if(c === Char.comma) {
-            this.state = STATE.OPEN_KEY;
-          } else {
-            throw new Error('Bad object');
+          while (isWhitespace(c)) {
+            if (i === l) break char;
+            c = chunk.charCodeAt(i++);
           }
+          if (c === Char.closeBrace) this.closenested();
+          else if(c === Char.comma) this.state = STATE.OPEN_KEY;
+          else throw new Error('Bad object');
           continue char;
         
-        case STATE.OPEN_ARRAY: // after an array there always a value
+        case STATE.OPEN_ARRAY:
+          while (isWhitespace(c)) {
+            if (i === l) break char;
+            c = chunk.charCodeAt(i++);
+          }
           if(c === Char.closeBracket) {
             // Empty Array
             this.closevalue([]);
@@ -260,15 +287,19 @@ export class MultiJSON {
           this.top++;
 
           this.call(STATE.VALUE, STATE.PARSE_ARRAY);
-          if (!isWhitespace(c)) continue;
+          if (!isWhitespace(c)) continue state;
           continue char;
   
         case STATE.PARSE_ARRAY:
+          while (isWhitespace(c)) {
+            if (i === l) break char;
+            c = chunk.charCodeAt(i++);
+          }
           if(c === Char.comma) {
             this.call(STATE.VALUE, STATE.PARSE_ARRAY);
           } else if (c === Char.closeBracket) {
             this.closenested();
-          } else  throw new Error('Bad array');
+          } else throw new Error('Bad array');
           continue char;
   
         case STATE.STRING: {
@@ -309,7 +340,7 @@ export class MultiJSON {
               else if (c === Char.f) { this.buffer += '\f'; }
               else if (c === Char.b) { this.buffer += '\b'; }
               else if (c === Char.u) {
-                // \uxxxx. meh!
+                // \uxxxx.
                 unicodeI = 1;
                 this.unicodeS = '';
               } else {
@@ -342,97 +373,122 @@ export class MultiJSON {
   
         case STATE.TRUE:
           if (c === Char.r) this.state = STATE.TRUE2;
-          else throw new Error('Invalid true started with t'+ c);
-          continue char;
+          else throw new Error(`Parsing 'true', expected 'r', got '${String.fromCharCode(c)}'.`);
+          if (i === l) break char;
+          c = chunk.charCodeAt(i++);
+          // fallthrough
   
         case STATE.TRUE2:
           if (c === Char.u) this.state = STATE.TRUE3;
-          else throw new Error('Invalid true started with tr'+ c);
-          continue char;
+          else throw new Error(`Parsing 'true', expected 'u', got '${String.fromCharCode(c)}'.`);
+          if (i === l) break char;
+          c = chunk.charCodeAt(i++);
+          // fallthrough
   
         case STATE.TRUE3:
-          if(c === Char.e) {
-            this.closevalue(true);
-          } else throw new Error('Invalid true started with tru'+ c);
+          if(c === Char.e) this.closevalue(true);
+          else throw new Error(`Parsing 'true', expected 'e', got '${String.fromCharCode(c)}'.`);
           continue char;
   
         case STATE.FALSE:
           if (c === Char.a) this.state = STATE.FALSE2;
-          else throw new Error('Invalid false started with f'+ c);
-          continue char;
+          else throw new Error(`Parsing 'false', expected 'a', got '${String.fromCharCode(c)}'.`);
+          if (i === l) break char;
+          c = chunk.charCodeAt(i++);
+          // fallthrough
   
         case STATE.FALSE2:
           if (c === Char.l) this.state = STATE.FALSE3;
-          else throw new Error('Invalid false started with fa'+ c);
-          continue char;
+          else throw new Error(`Parsing 'false', expected 'l', got '${String.fromCharCode(c)}'.`);
+          if (i === l) break char;
+          c = chunk.charCodeAt(i++);
+          // fallthrough
   
         case STATE.FALSE3:
           if (c === Char.s) this.state = STATE.FALSE4;
-          else throw new Error('Invalid false started with fal'+ c);
-          continue char;
+          else throw new Error(`Parsing 'false', expected 's', got '${String.fromCharCode(c)}'.`);
+          if (i === l) break char;
+          c = chunk.charCodeAt(i++);
+          // fallthrough
   
         case STATE.FALSE4:
-          if (c === Char.e) {
-            this.closevalue(false);
-          } else throw new Error('Invalid false started with fals'+ c);
+          if (c === Char.e) this.closevalue(false);
+          else throw new Error(`Parsing 'false', expected 'e', got '${String.fromCharCode(c)}'.`);
           continue char;
   
         case STATE.NULL:
           if (c === Char.u) this.state = STATE.NULL2;
-          else throw new Error('Invalid null started with n'+ c);
-          continue char;
+          else throw new Error(`Parsing 'null', expected 'u', got '${String.fromCharCode(c)}'.`);
+          if (i === l) break char;
+          c = chunk.charCodeAt(i++);
+          // fallthrough
   
         case STATE.NULL2:
           if (c === Char.l) this.state = STATE.NULL3;
-          else throw new Error('Invalid null started with nu'+ c);
-          continue char;
+          else throw new Error(`Parsing 'null', expected 'l', got '${String.fromCharCode(c)}'.`);
+          if (i === l) break char;
+          c = chunk.charCodeAt(i++);
+          // fallthrough
   
         case STATE.NULL3:
-          if(c === Char.l) {
-            this.closevalue(null);
-          } else throw new Error('Invalid null started with nul'+ c);
+          if(c === Char.l) this.closevalue(null);
+          else throw new Error(`Parsing 'null', expected 'l', got '${String.fromCharCode(c)}'.`);
           continue char;
-  
+
         case STATE.NUMBER_NEGATIVE:
-          this.state = (c === Char._0) ?
-            STATE.NUMBER_DECIMAL_POINT:
-            STATE.NUMBER_DIGIT;
-          continue;
+          if (c === Char._0) {
+            this.state = STATE.NUMBER_DECIMAL_POINT;
+            continue char;
+          }
+          this.state = STATE.NUMBER_DIGIT;
+          continue state;
 
         case STATE.NUMBER_DECIMAL_POINT:
-          if(c === Char._0) {
-            this.buffer += "0";
-            this.state       = STATE.NUMBER_DECIMAL_POINT;
-          } else {
-            this.state = STATE.NUMBER_DIGIT;
-            continue;
-          }
-          continue char;
+          if(c !== Char.period) throw new Error(`Parsing number, expected '.', got '${String.fromCharCode(c)}'.`);
+          this.buffer += ".";
+          this.fraction = true;
+          if (i === l) break char;
+          c = chunk.charCodeAt(i++);
+          //fallthrough
   
         case STATE.NUMBER_DIGIT:
-          if(Char._0 <= c && c <= Char._9) this.buffer += String.fromCharCode(c);
-          else if (c === Char.period) {
-            if(this.fraction) throw new Error('Invalid number has two dots');
-            this.buffer += ".";
-            this.fraction = true;
-          } else if (c === Char.e || c === Char.E) {
-            if(this.exponent) throw new Error('Invalid number has two exponential');
-            this.buffer += "e";
-            this.exponent = true;
-          } else if (c === Char.plus || c === Char.minus) {
-            if(!this.exponent) throw new Error('Invalid symbol in number');
-            this.buffer += String.fromCharCode(c);
-          } else {
-            this.closevalue(parseFloat(this.buffer));
-            this.buffer = "";
-            this.exponent = false;
-            this.fraction = false;
-            continue;
+          for (;;) {
+            if (Char._0 <= c && c <= Char._9) {
+              this.buffer += String.fromCharCode(c);
+            } else if (c === Char.period) {
+              if(this.fraction)
+                throw new Error('Invalid number has two dots.');
+              this.buffer += ".";
+              this.fraction = true;
+            } else if (c === Char.e || c === Char.E) {
+              if(this.exponent)
+                throw new Error('Invalid number has two exponents.');
+              this.buffer += "e";
+              this.exponent = true;
+            } else if (c === Char.plus || c === Char.minus) {
+              if(!this.buffer.endsWith('e'))
+                throw new Error(`Invalid symbol in number: '${String.fromCharCode(c)}'.`);
+              this.buffer += String.fromCharCode(c);
+            } else if (c === Char.n) {
+              if(this.fraction || this.exponent)
+                throw new Error("Invalid symbol in number: 'n'.");
+                this.closevalue(BigInt(this.buffer));
+                this.exponent = false;
+                this.fraction = false;
+                continue char;
+            } else {
+              this.closevalue(parseFloat(this.buffer));
+              this.exponent = false;
+              this.fraction = false;
+              continue state;
+            }
+            if (i === l) break char;
+            c = chunk.charCodeAt(i++);
           }
-          continue char;
   
         default:
           throw new Error("Unknown state: " + STATE[this.state]);
+        }
       }
     }
 
